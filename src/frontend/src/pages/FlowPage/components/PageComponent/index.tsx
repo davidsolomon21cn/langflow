@@ -1,226 +1,364 @@
-import _ from "lodash";
-import { useCallback, useContext, useEffect, useRef, useState } from "react";
-import ReactFlow, {
+import { DefaultEdge } from "@/CustomEdges";
+import NoteNode from "@/CustomNodes/NoteNode";
+
+import ForwardedIconComponent from "@/components/common/genericIconComponent";
+import LoadingComponent from "@/components/common/loadingComponent";
+import CanvasControls, {
+  CustomControlButton,
+} from "@/components/core/canvasControlsComponent";
+import FlowToolbar from "@/components/core/flowToolbarComponent";
+import { SidebarTrigger } from "@/components/ui/sidebar";
+import {
+  COLOR_OPTIONS,
+  NOTE_NODE_MIN_HEIGHT,
+  NOTE_NODE_MIN_WIDTH,
+} from "@/constants/constants";
+import { useGetBuildsQuery } from "@/controllers/API/queries/_builds";
+import { track } from "@/customization/utils/analytics";
+import useAutoSaveFlow from "@/hooks/flows/use-autosave-flow";
+import useUploadFlow from "@/hooks/flows/use-upload-flow";
+import { useAddComponent } from "@/hooks/useAddComponent";
+import { nodeColorsName } from "@/utils/styleUtils";
+import { cn, isSupportedNodeTypes } from "@/utils/utils";
+import {
   Background,
   Connection,
-  Controls,
   Edge,
-  EdgeChange,
-  NodeChange,
-  NodeDragHandler,
-  OnEdgesDelete,
+  OnNodeDrag,
   OnSelectionChangeParams,
+  Panel,
+  ReactFlow,
+  reconnectEdge,
   SelectionDragHandler,
-  addEdge,
-  updateEdge,
-  useEdgesState,
-  useNodesState,
-  useReactFlow,
-} from "reactflow";
+} from "@xyflow/react";
+import _, { cloneDeep } from "lodash";
+import {
+  KeyboardEvent,
+  MouseEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import { useHotkeys } from "react-hotkeys-hook";
 import GenericNode from "../../../../CustomNodes/GenericNode";
-import Chat from "../../../../components/chatComponent";
-import { alertContext } from "../../../../contexts/alertContext";
-import { locationContext } from "../../../../contexts/locationContext";
-import { TabsContext } from "../../../../contexts/tabsContext";
-import { typesContext } from "../../../../contexts/typesContext";
-import { undoRedoContext } from "../../../../contexts/undoRedoContext";
+import {
+  INVALID_SELECTION_ERROR_ALERT,
+  UPLOAD_ALERT_LIST,
+  UPLOAD_ERROR_ALERT,
+  WRONG_FILE_ERROR_ALERT,
+} from "../../../../constants/alerts_constants";
+import useAlertStore from "../../../../stores/alertStore";
+import useFlowStore from "../../../../stores/flowStore";
+import useFlowsManagerStore from "../../../../stores/flowsManagerStore";
+import { useShortcutsStore } from "../../../../stores/shortcuts";
+import { useTypesStore } from "../../../../stores/typesStore";
 import { APIClassType } from "../../../../types/api";
-import { FlowType, NodeType } from "../../../../types/flow";
-import { isValidConnection } from "../../../../utils";
+import { AllNodeType, EdgeType, NoteNodeType } from "../../../../types/flow";
+import {
+  generateFlow,
+  generateNodeFromFlow,
+  getNodeId,
+  isValidConnection,
+  scapeJSONParse,
+  updateIds,
+  validateSelection,
+} from "../../../../utils/reactflowUtils";
 import ConnectionLineComponent from "../ConnectionLineComponent";
-import ExtraSidebar from "../extraSidebarComponent";
+import SelectionMenu from "../SelectionMenuComponent";
+import UpdateAllComponents from "../UpdateAllComponents";
+import getRandomName from "./utils/get-random-name";
+import isWrappedWithClass from "./utils/is-wrapped-with-class";
 
 const nodeTypes = {
   genericNode: GenericNode,
+  noteNode: NoteNode,
 };
 
-export default function Page({ flow }: { flow: FlowType }) {
-  let {
-    updateFlow,
-    uploadFlow,
-    disableCopyPaste,
-    addFlow,
-    getNodeId,
-    paste,
-    lastCopiedSelection,
-    setLastCopiedSelection,
-    tabsState,
-    saveFlow,
-    setTabsState,
-    tabId,
-  } = useContext(TabsContext);
-  const { types, reactFlowInstance, setReactFlowInstance, templates } =
-    useContext(typesContext);
-  const reactFlowWrapper = useRef(null);
+const edgeTypes = {
+  default: DefaultEdge,
+};
 
-  const { takeSnapshot } = useContext(undoRedoContext);
+export default function Page({ view }: { view?: boolean }): JSX.Element {
+  const uploadFlow = useUploadFlow();
+  const autoSaveFlow = useAutoSaveFlow();
+  const types = useTypesStore((state) => state.types);
+  const templates = useTypesStore((state) => state.templates);
+  const setFilterEdge = useFlowStore((state) => state.setFilterEdge);
+  const reactFlowWrapper = useRef<HTMLDivElement>(null);
+  const setPositionDictionary = useFlowStore(
+    (state) => state.setPositionDictionary,
+  );
 
-  const [position, setPosition] = useState({ x: 0, y: 0 });
+  const reactFlowInstance = useFlowStore((state) => state.reactFlowInstance);
+  const setReactFlowInstance = useFlowStore(
+    (state) => state.setReactFlowInstance,
+  );
+  const nodes = useFlowStore((state) => state.nodes);
+  const edges = useFlowStore((state) => state.edges);
+  const isEmptyFlow = useRef(nodes.length === 0);
+  const onNodesChange = useFlowStore((state) => state.onNodesChange);
+  const onEdgesChange = useFlowStore((state) => state.onEdgesChange);
+  const setNodes = useFlowStore((state) => state.setNodes);
+  const setEdges = useFlowStore((state) => state.setEdges);
+  const deleteNode = useFlowStore((state) => state.deleteNode);
+  const deleteEdge = useFlowStore((state) => state.deleteEdge);
+  const undo = useFlowsManagerStore((state) => state.undo);
+  const redo = useFlowsManagerStore((state) => state.redo);
+  const takeSnapshot = useFlowsManagerStore((state) => state.takeSnapshot);
+  const paste = useFlowStore((state) => state.paste);
+  const lastCopiedSelection = useFlowStore(
+    (state) => state.lastCopiedSelection,
+  );
+  const setLastCopiedSelection = useFlowStore(
+    (state) => state.setLastCopiedSelection,
+  );
+  const onConnect = useFlowStore((state) => state.onConnect);
+  const setErrorData = useAlertStore((state) => state.setErrorData);
+  const updateCurrentFlow = useFlowStore((state) => state.updateCurrentFlow);
+  const [selectionMenuVisible, setSelectionMenuVisible] = useState(false);
+  const edgeUpdateSuccessful = useRef(true);
+
+  const position = useRef({ x: 0, y: 0 });
   const [lastSelection, setLastSelection] =
-    useState<OnSelectionChangeParams>(null);
+    useState<OnSelectionChangeParams | null>(null);
+  const currentFlowId = useFlowsManagerStore((state) => state.currentFlowId);
+
+  const [isAddingNote, setIsAddingNote] = useState(false);
+
+  const addComponent = useAddComponent();
+
+  const zoomLevel = reactFlowInstance?.getZoom();
+  const shadowBoxWidth = NOTE_NODE_MIN_WIDTH * (zoomLevel || 1);
+  const shadowBoxHeight = NOTE_NODE_MIN_HEIGHT * (zoomLevel || 1);
+  const shadowBoxBackgroundColor = COLOR_OPTIONS[Object.keys(COLOR_OPTIONS)[0]];
+
+  function handleGroupNode() {
+    takeSnapshot();
+    if (validateSelection(lastSelection!, edges).length === 0) {
+      const clonedNodes = cloneDeep(nodes);
+      const clonedEdges = cloneDeep(edges);
+      const clonedSelection = cloneDeep(lastSelection);
+      updateIds({ nodes: clonedNodes, edges: clonedEdges }, clonedSelection!);
+      const { newFlow } = generateFlow(
+        clonedSelection!,
+        clonedNodes,
+        clonedEdges,
+        getRandomName(),
+      );
+
+      const newGroupNode = generateNodeFromFlow(newFlow, getNodeId);
+
+      setNodes([
+        ...clonedNodes.filter(
+          (oldNodes) =>
+            !clonedSelection?.nodes.some(
+              (selectionNode) => selectionNode.id === oldNodes.id,
+            ),
+        ),
+        newGroupNode,
+      ]);
+    } else {
+      setErrorData({
+        title: INVALID_SELECTION_ERROR_ALERT,
+        list: validateSelection(lastSelection!, edges),
+      });
+    }
+  }
 
   useEffect(() => {
-    // this effect is used to attach the global event handlers
-
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (
-        (event.ctrlKey || event.metaKey) &&
-        event.key === "c" &&
-        lastSelection &&
-        !disableCopyPaste
-      ) {
-        event.preventDefault();
-        setLastCopiedSelection(_.cloneDeep(lastSelection));
-      }
-      if (
-        (event.ctrlKey || event.metaKey) &&
-        event.key === "v" &&
-        lastCopiedSelection &&
-        !disableCopyPaste
-      ) {
-        event.preventDefault();
-        let bounds = reactFlowWrapper.current.getBoundingClientRect();
-        paste(lastCopiedSelection, {
-          x: position.x - bounds.left,
-          y: position.y - bounds.top,
-        });
-      }
-      if (
-        (event.ctrlKey || event.metaKey) &&
-        event.key === "g" &&
-        lastSelection
-      ) {
-        event.preventDefault();
-        // addFlow(newFlow, false);
-      }
-    };
     const handleMouseMove = (event) => {
-      setPosition({ x: event.clientX, y: event.clientY });
+      position.current = { x: event.clientX, y: event.clientY };
     };
 
-    document.addEventListener("keydown", onKeyDown);
     document.addEventListener("mousemove", handleMouseMove);
 
     return () => {
-      document.removeEventListener("keydown", onKeyDown);
       document.removeEventListener("mousemove", handleMouseMove);
     };
-  }, [position, lastCopiedSelection, lastSelection]);
+  }, [lastCopiedSelection, lastSelection, takeSnapshot, selectionMenuVisible]);
 
-  const [selectionMenuVisible, setSelectionMenuVisible] = useState(false);
+  const { isFetching } = useGetBuildsQuery({ flowId: currentFlowId });
 
-  const { setExtraComponent, setExtraNavigation } = useContext(locationContext);
-  const { setErrorData } = useContext(alertContext);
-  const [nodes, setNodes, onNodesChange] = useNodesState(
-    flow.data?.nodes ?? []
-  );
-  const [edges, setEdges, onEdgesChange] = useEdgesState(
-    flow.data?.edges ?? []
-  );
-  const { setViewport } = useReactFlow();
-  const edgeUpdateSuccessful = useRef(true);
+  const showCanvas =
+    Object.keys(templates).length > 0 &&
+    Object.keys(types).length > 0 &&
+    !isFetching;
+
   useEffect(() => {
-    if (reactFlowInstance && flow) {
-      flow.data = reactFlowInstance.toObject();
-      updateFlow(flow);
+    useFlowStore.setState({ autoSaveFlow });
+  }, [autoSaveFlow]);
+
+  function handleUndo(e: KeyboardEvent) {
+    if (!isWrappedWithClass(e, "noflow")) {
+      e.preventDefault();
+      (e as unknown as Event).stopImmediatePropagation();
+      undo();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, edges]);
-  //update flow when tabs change
-  useEffect(() => {
-    setNodes(flow?.data?.nodes ?? []);
-    setEdges(flow?.data?.edges ?? []);
-    if (reactFlowInstance) {
-      setViewport(flow?.data?.viewport ?? { x: 1, y: 0, zoom: 0.5 });
-      reactFlowInstance.fitView();
+  }
+
+  function handleRedo(e: KeyboardEvent) {
+    if (!isWrappedWithClass(e, "noflow")) {
+      e.preventDefault();
+      (e as unknown as Event).stopImmediatePropagation();
+      redo();
     }
-  }, [flow, reactFlowInstance, setEdges, setNodes, setViewport]);
-  //set extra sidebar
-  useEffect(() => {
-    setExtraComponent(<ExtraSidebar />);
-    setExtraNavigation({ title: "Components" });
-  }, [setExtraComponent, setExtraNavigation]);
+  }
 
-  const onEdgesChangeMod = useCallback(
-    (s: EdgeChange[]) => {
-      onEdgesChange(s);
-      setNodes((x) => {
-        let newX = _.cloneDeep(x);
-        return newX;
-      });
-      setTabsState((prev) => {
-        return {
-          ...prev,
-          [tabId]: {
-            ...prev[tabId],
-            isPending: true,
-          },
-        };
-      });
-    },
-    [onEdgesChange, setNodes, setTabsState, tabId]
-  );
+  function handleGroup(e: KeyboardEvent) {
+    if (selectionMenuVisible) {
+      e.preventDefault();
+      (e as unknown as Event).stopImmediatePropagation();
+      handleGroupNode();
+    }
+  }
 
-  const onNodesChangeMod = useCallback(
-    (s: NodeChange[]) => {
-      onNodesChange(s);
-      setTabsState((prev) => {
-        return {
-          ...prev,
-          [tabId]: {
-            ...prev[tabId],
-            isPending: true,
-          },
-        };
-      });
-    },
-    [onNodesChange, setTabsState, tabId]
-  );
+  function handleDuplicate(e: KeyboardEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    (e as unknown as Event).stopImmediatePropagation();
+    const selectedNode = nodes.filter((obj) => obj.selected);
+    if (selectedNode.length > 0) {
+      paste(
+        { nodes: selectedNode, edges: [] },
+        {
+          x: position.current.x,
+          y: position.current.y,
+        },
+      );
+    }
+  }
 
-  const onConnect = useCallback(
+  function handleCopy(e: KeyboardEvent) {
+    const multipleSelection = lastSelection?.nodes
+      ? lastSelection?.nodes.length > 0
+      : false;
+    if (
+      !isWrappedWithClass(e, "noflow") &&
+      (isWrappedWithClass(e, "react-flow__node") || multipleSelection)
+    ) {
+      e.preventDefault();
+      (e as unknown as Event).stopImmediatePropagation();
+      if (window.getSelection()?.toString().length === 0 && lastSelection) {
+        setLastCopiedSelection(_.cloneDeep(lastSelection));
+      }
+    }
+  }
+
+  function handleCut(e: KeyboardEvent) {
+    if (!isWrappedWithClass(e, "noflow")) {
+      e.preventDefault();
+      (e as unknown as Event).stopImmediatePropagation();
+      if (window.getSelection()?.toString().length === 0 && lastSelection) {
+        setLastCopiedSelection(_.cloneDeep(lastSelection), true);
+      }
+    }
+  }
+
+  function handlePaste(e: KeyboardEvent) {
+    if (!isWrappedWithClass(e, "noflow")) {
+      e.preventDefault();
+      (e as unknown as Event).stopImmediatePropagation();
+      if (
+        window.getSelection()?.toString().length === 0 &&
+        lastCopiedSelection
+      ) {
+        takeSnapshot();
+        paste(lastCopiedSelection, {
+          x: position.current.x,
+          y: position.current.y,
+        });
+      }
+    }
+  }
+
+  function handleDelete(e: KeyboardEvent) {
+    if (!isWrappedWithClass(e, "nodelete") && lastSelection) {
+      e.preventDefault();
+      (e as unknown as Event).stopImmediatePropagation();
+      takeSnapshot();
+      if (lastSelection.edges?.length) {
+        track("Component Connection Deleted");
+      }
+      if (lastSelection.nodes?.length) {
+        lastSelection.nodes.forEach((n) => {
+          track("Component Deleted", { componentType: n.data.type });
+        });
+      }
+      deleteNode(lastSelection.nodes.map((node) => node.id));
+      deleteEdge(lastSelection.edges.map((edge) => edge.id));
+    }
+  }
+
+  const undoAction = useShortcutsStore((state) => state.undo);
+  const redoAction = useShortcutsStore((state) => state.redo);
+  const redoAltAction = useShortcutsStore((state) => state.redoAlt);
+  const copyAction = useShortcutsStore((state) => state.copy);
+  const duplicate = useShortcutsStore((state) => state.duplicate);
+  const deleteAction = useShortcutsStore((state) => state.delete);
+  const groupAction = useShortcutsStore((state) => state.group);
+  const cutAction = useShortcutsStore((state) => state.cut);
+  const pasteAction = useShortcutsStore((state) => state.paste);
+  //@ts-ignore
+  useHotkeys(undoAction, handleUndo);
+  //@ts-ignore
+  useHotkeys(redoAction, handleRedo);
+  //@ts-ignore
+  useHotkeys(redoAltAction, handleRedo);
+  //@ts-ignore
+  useHotkeys(groupAction, handleGroup);
+  //@ts-ignore
+  useHotkeys(duplicate, handleDuplicate);
+  //@ts-ignore
+  useHotkeys(copyAction, handleCopy);
+  //@ts-ignore
+  useHotkeys(cutAction, handleCut);
+  //@ts-ignore
+  useHotkeys(pasteAction, handlePaste);
+  //@ts-ignore
+  useHotkeys(deleteAction, handleDelete);
+  //@ts-ignore
+  useHotkeys("delete", handleDelete);
+
+  const onConnectMod = useCallback(
     (params: Connection) => {
       takeSnapshot();
-      setEdges((eds) =>
-        addEdge(
-          {
-            ...params,
-            style: { stroke: "#555" },
-            className:
-              (params.targetHandle.split("|")[0] === "Text"
-                ? "stroke-foreground "
-                : "stroke-foreground ") + " stroke-connection",
-            animated: params.targetHandle.split("|")[0] === "Text",
-          },
-          eds
-        )
-      );
-      setNodes((x) => {
-        let newX = _.cloneDeep(x);
-        return newX;
-      });
+      onConnect(params);
+      track("New Component Connection Added");
     },
-    [setEdges, setNodes, takeSnapshot]
+    [takeSnapshot, onConnect],
   );
 
-  const onNodeDragStart: NodeDragHandler = useCallback(() => {
+  const onNodeDragStart: OnNodeDrag = useCallback(() => {
     // 👇 make dragging a node undoable
+
     takeSnapshot();
     // 👉 you can place your event handlers here
   }, [takeSnapshot]);
 
+  const onNodeDragStop: OnNodeDrag = useCallback(() => {
+    // 👇 make moving the canvas undoable
+    autoSaveFlow();
+    updateCurrentFlow({ nodes });
+    setPositionDictionary({});
+  }, [
+    takeSnapshot,
+    autoSaveFlow,
+    nodes,
+    edges,
+    reactFlowInstance,
+    setPositionDictionary,
+  ]);
+
   const onSelectionDragStart: SelectionDragHandler = useCallback(() => {
     // 👇 make dragging a selection undoable
-    takeSnapshot();
-  }, [takeSnapshot]);
 
-  const onEdgesDelete: OnEdgesDelete = useCallback(() => {
-    // 👇 make deleting edges undoable
     takeSnapshot();
   }, [takeSnapshot]);
 
   const onDragOver = useCallback((event: React.DragEvent) => {
     event.preventDefault();
-    if (event.dataTransfer.types.some((t) => t === "nodedata")) {
+    if (event.dataTransfer.types.some((types) => isSupportedNodeTypes(types))) {
       event.dataTransfer.dropEffect = "move";
     } else {
       event.dataTransfer.dropEffect = "copy";
@@ -230,85 +368,50 @@ export default function Page({ flow }: { flow: FlowType }) {
   const onDrop = useCallback(
     (event: React.DragEvent) => {
       event.preventDefault();
-      if (event.dataTransfer.types.some((t) => t === "nodedata")) {
+      const grabbingElement =
+        document.getElementsByClassName("cursor-grabbing");
+      if (grabbingElement.length > 0) {
+        document.body.removeChild(grabbingElement[0]);
+      }
+      if (event.dataTransfer.types.some((type) => isSupportedNodeTypes(type))) {
         takeSnapshot();
 
-        // Get the current bounds of the ReactFlow wrapper element
-        const reactflowBounds =
-          reactFlowWrapper.current.getBoundingClientRect();
-
-        // Extract the data from the drag event and parse it as a JSON object
-        let data: { type: string; node?: APIClassType } = JSON.parse(
-          event.dataTransfer.getData("nodedata")
+        const datakey = event.dataTransfer.types.find((type) =>
+          isSupportedNodeTypes(type),
         );
 
-        // If data type is not "chatInput" or if there are no "chatInputNode" nodes present in the ReactFlow instance, create a new node
-        // Calculate the position where the node should be created
-        const position = reactFlowInstance.project({
-          x: event.clientX - reactflowBounds.left,
-          y: event.clientY - reactflowBounds.top,
+        // Extract the data from the drag event and parse it as a JSON object
+        const data: { type: string; node?: APIClassType } = JSON.parse(
+          event.dataTransfer.getData(datakey!),
+        );
+
+        addComponent(data.node!, data.type, {
+          x: event.clientX,
+          y: event.clientY,
         });
-
-        // Generate a unique node ID
-        let { type } = data;
-        let newId = getNodeId(type);
-        let newNode: NodeType;
-
-        if (data.type !== "groupNode") {
-          // Create a new node object
-          newNode = {
-            id: newId,
-            type: "genericNode",
-            position,
-            data: {
-              ...data,
-              id: newId,
-              value: null,
-            },
-          };
-        } else {
-          // Create a new node object
-          newNode = {
-            id: newId,
-            type: "genericNode",
-            position,
-            data: {
-              ...data,
-              id: newId,
-              value: null,
-            },
-          };
-
-          // Add the new node to the list of nodes in state
-        }
-        setNodes((nds) => nds.concat(newNode));
-      } else if (event.dataTransfer.types.some((t) => t === "Files")) {
+      } else if (event.dataTransfer.types.some((types) => types === "Files")) {
         takeSnapshot();
-        uploadFlow(false, event.dataTransfer.files.item(0));
+        const position = {
+          x: event.clientX,
+          y: event.clientY,
+        };
+        uploadFlow({
+          files: Array.from(event.dataTransfer.files!),
+          position: position,
+        }).catch((error) => {
+          setErrorData({
+            title: UPLOAD_ERROR_ALERT,
+            list: [(error as Error).message],
+          });
+        });
+      } else {
+        setErrorData({
+          title: WRONG_FILE_ERROR_ALERT,
+          list: [UPLOAD_ALERT_LIST],
+        });
       }
     },
-    // Specify dependencies for useCallback
-    [getNodeId, reactFlowInstance, setNodes, takeSnapshot]
-  );
-
-  useEffect(() => {
-    return () => {
-      if (tabsState && tabsState[flow.id]?.isPending) {
-        saveFlow(flow);
-      }
-    };
-  }, []);
-
-  const onDelete = useCallback(
-    (mynodes) => {
-      takeSnapshot();
-      setEdges(
-        edges.filter(
-          (ns) => !mynodes.some((n) => ns.source === n.id || ns.target === n.id)
-        )
-      );
-    },
-    [takeSnapshot, edges, setEdges]
+    [takeSnapshot, addComponent],
   );
 
   const onEdgeUpdateStart = useCallback(() => {
@@ -316,29 +419,32 @@ export default function Page({ flow }: { flow: FlowType }) {
   }, []);
 
   const onEdgeUpdate = useCallback(
-    (oldEdge: Edge, newConnection: Connection) => {
-      if (isValidConnection(newConnection, reactFlowInstance)) {
+    (oldEdge: EdgeType, newConnection: Connection) => {
+      if (isValidConnection(newConnection, nodes, edges)) {
         edgeUpdateSuccessful.current = true;
-        setEdges((els) => updateEdge(oldEdge, newConnection, els));
+        oldEdge.data = {
+          targetHandle: scapeJSONParse(newConnection.targetHandle!),
+          sourceHandle: scapeJSONParse(newConnection.sourceHandle!),
+        };
+        setEdges((els) => reconnectEdge(oldEdge, newConnection, els));
       }
     },
-    [reactFlowInstance, setEdges]
+    [setEdges],
   );
 
-  const onEdgeUpdateEnd = useCallback((_, edge) => {
+  const onEdgeUpdateEnd = useCallback((_, edge: Edge): void => {
     if (!edgeUpdateSuccessful.current) {
-      setEdges((eds) => eds.filter((e) => e.id !== edge.id));
+      setEdges((eds) => eds.filter((edg) => edg.id !== edge.id));
     }
-
     edgeUpdateSuccessful.current = true;
   }, []);
 
-  const [selectionEnded, setSelectionEnded] = useState(false);
+  const [selectionEnded, setSelectionEnded] = useState(true);
 
   const onSelectionEnd = useCallback(() => {
     setSelectionEnded(true);
   }, []);
-  const onSelectionStart = useCallback((event) => {
+  const onSelectionStart = useCallback((event: MouseEvent) => {
     event.preventDefault();
     setSelectionEnded(false);
   }, []);
@@ -352,83 +458,186 @@ export default function Page({ flow }: { flow: FlowType }) {
     }
   }, [selectionEnded, lastSelection]);
 
-  const onSelectionChange = useCallback((flow) => {
-    setLastSelection(flow);
-  }, []);
+  const onSelectionChange = useCallback(
+    (flow: OnSelectionChangeParams): void => {
+      setLastSelection(flow);
+    },
+    [],
+  );
 
-  const { setDisableCopyPaste } = useContext(TabsContext);
+  const onPaneClick = useCallback(
+    (event: React.MouseEvent) => {
+      setFilterEdge([]);
+      if (isAddingNote) {
+        const shadowBox = document.getElementById("shadow-box");
+        if (shadowBox) {
+          shadowBox.style.display = "none";
+        }
+        const position = reactFlowInstance?.screenToFlowPosition({
+          x: event.clientX - shadowBoxWidth / 2,
+          y: event.clientY - shadowBoxHeight / 2,
+        });
+        const data = {
+          node: {
+            description: "",
+            display_name: "",
+            documentation: "",
+            template: {},
+          },
+          type: "note",
+        };
+        const newId = getNodeId(data.type);
+
+        const newNode: NoteNodeType = {
+          id: newId,
+          type: "noteNode",
+          position: position || { x: 0, y: 0 },
+          data: {
+            ...data,
+            id: newId,
+          },
+        };
+        setNodes((nds) => nds.concat(newNode));
+        setIsAddingNote(false);
+      }
+    },
+    [isAddingNote, setNodes, reactFlowInstance, getNodeId, setFilterEdge],
+  );
+
+  const handleEdgeClick = (event, edge) => {
+    const color =
+      nodeColorsName[edge?.data?.sourceHandle?.output_types[0]] || "cyan";
+
+    const accentColor = `hsl(var(--datatype-${color}))`;
+    reactFlowWrapper.current?.style.setProperty("--selected", accentColor);
+  };
+
+  useEffect(() => {
+    const handleGlobalMouseMove = (event) => {
+      if (isAddingNote) {
+        const shadowBox = document.getElementById("shadow-box");
+        if (shadowBox) {
+          shadowBox.style.display = "block";
+          shadowBox.style.left = `${event.clientX - shadowBoxWidth / 2}px`;
+          shadowBox.style.top = `${event.clientY - shadowBoxHeight / 2}px`;
+        }
+      }
+    };
+
+    document.addEventListener("mousemove", handleGlobalMouseMove);
+
+    return () => {
+      document.removeEventListener("mousemove", handleGlobalMouseMove);
+    };
+  }, [isAddingNote, shadowBoxWidth, shadowBoxHeight]);
+
+  const componentsToUpdate = useFlowStore((state) => state.componentsToUpdate);
 
   return (
-    <div className="flex h-full overflow-hidden">
-      <ExtraSidebar />
-      {/* Main area */}
-      <main className="flex flex-1">
-        {/* Primary column */}
-        <div className="h-full w-full">
-          <div className="h-full w-full" ref={reactFlowWrapper}>
-            {Object.keys(templates).length > 0 &&
-            Object.keys(types).length > 0 ? (
-              <div className="h-full w-full">
-                <ReactFlow
-                  nodes={nodes}
-                  onMove={() => {
-                    if (reactFlowInstance)
-                      updateFlow({
-                        ...flow,
-                        data: reactFlowInstance.toObject(),
-                      });
-                  }}
-                  edges={edges}
-                  onPaneClick={() => {
-                    setDisableCopyPaste(false);
-                  }}
-                  onPaneMouseLeave={() => {
-                    setDisableCopyPaste(true);
-                  }}
-                  onPaneMouseEnter={() => {
-                    setDisableCopyPaste(false);
-                  }}
-                  onNodesChange={onNodesChangeMod}
-                  onEdgesChange={onEdgesChangeMod}
-                  onConnect={onConnect}
-                  disableKeyboardA11y={true}
-                  onLoad={setReactFlowInstance}
-                  onInit={setReactFlowInstance}
-                  nodeTypes={nodeTypes}
-                  onEdgeUpdate={onEdgeUpdate}
-                  onEdgeUpdateStart={onEdgeUpdateStart}
-                  onEdgeUpdateEnd={onEdgeUpdateEnd}
-                  onNodeDragStart={onNodeDragStart}
-                  onSelectionDragStart={onSelectionDragStart}
-                  onSelectionEnd={onSelectionEnd}
-                  onSelectionStart={onSelectionStart}
-                  onEdgesDelete={onEdgesDelete}
-                  connectionLineComponent={ConnectionLineComponent}
-                  onDragOver={onDragOver}
-                  onDrop={onDrop}
-                  onNodesDelete={onDelete}
-                  onSelectionChange={onSelectionChange}
-                  nodesDraggable={!disableCopyPaste}
-                  panOnDrag={!disableCopyPaste}
-                  zoomOnDoubleClick={!disableCopyPaste}
-                  className="theme-attribution"
-                  minZoom={0.01}
-                  maxZoom={8}
-                >
-                  <Background className="" />
-                  <Controls
-                    className="bg-muted fill-foreground stroke-foreground text-primary
-                   [&>button]:border-b-border hover:[&>button]:bg-border"
-                  ></Controls>
-                </ReactFlow>
-                <Chat flow={flow} reactFlowInstance={reactFlowInstance} />
-              </div>
-            ) : (
-              <></>
+    <div className="h-full w-full bg-canvas" ref={reactFlowWrapper}>
+      {showCanvas ? (
+        <div id="react-flow-id" className="h-full w-full bg-canvas">
+          <ReactFlow<AllNodeType, EdgeType>
+            nodes={nodes}
+            edges={edges}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            onConnect={onConnectMod}
+            disableKeyboardA11y={true}
+            onInit={setReactFlowInstance}
+            nodeTypes={nodeTypes}
+            onReconnect={onEdgeUpdate}
+            onReconnectStart={onEdgeUpdateStart}
+            onReconnectEnd={onEdgeUpdateEnd}
+            onNodeDragStart={onNodeDragStart}
+            onSelectionDragStart={onSelectionDragStart}
+            onSelectionEnd={onSelectionEnd}
+            onSelectionStart={onSelectionStart}
+            connectionRadius={30}
+            edgeTypes={edgeTypes}
+            connectionLineComponent={ConnectionLineComponent}
+            onDragOver={onDragOver}
+            onNodeDragStop={onNodeDragStop}
+            onDrop={onDrop}
+            onSelectionChange={onSelectionChange}
+            deleteKeyCode={[]}
+            fitView={isEmptyFlow.current ? false : true}
+            className="theme-attribution"
+            minZoom={0.01}
+            maxZoom={8}
+            zoomOnScroll={!view}
+            zoomOnPinch={!view}
+            panOnDrag={!view}
+            panActivationKeyCode={""}
+            proOptions={{ hideAttribution: true }}
+            onPaneClick={onPaneClick}
+            onEdgeClick={handleEdgeClick}
+          >
+            <Background size={2} gap={20} className="" />
+            {!view && (
+              <>
+                <CanvasControls>
+                  <CustomControlButton
+                    iconName="sticky-note"
+                    tooltipText="Add Note"
+                    onClick={() => {
+                      setIsAddingNote(true);
+                      const shadowBox = document.getElementById("shadow-box");
+                      if (shadowBox) {
+                        shadowBox.style.display = "block";
+                        shadowBox.style.left = `${position.current.x - shadowBoxWidth / 2}px`;
+                        shadowBox.style.top = `${position.current.y - shadowBoxHeight / 2}px`;
+                      }
+                    }}
+                    iconClasses="text-primary"
+                    testId="add_note"
+                  />
+                </CanvasControls>
+                <FlowToolbar />
+              </>
             )}
-          </div>
+            <Panel
+              className={cn(
+                "react-flow__controls !m-2 flex gap-1.5 rounded-md border border-secondary-hover bg-background fill-foreground stroke-foreground p-1.5 text-primary shadow transition-all duration-300 [&>button]:border-0 [&>button]:bg-background hover:[&>button]:bg-accent",
+                "pointer-events-auto opacity-100 group-data-[open=true]/sidebar-wrapper:pointer-events-none group-data-[open=true]/sidebar-wrapper:-translate-x-full group-data-[open=true]/sidebar-wrapper:opacity-0",
+              )}
+              position="top-left"
+            >
+              <SidebarTrigger className="h-fit w-fit px-3 py-1.5">
+                <ForwardedIconComponent
+                  name="PanelRightClose"
+                  className="h-4 w-4"
+                />
+                <span className="text-foreground">Components</span>
+              </SidebarTrigger>
+            </Panel>
+            {componentsToUpdate.length > 0 && <UpdateAllComponents />}
+            <SelectionMenu
+              lastSelection={lastSelection}
+              isVisible={selectionMenuVisible}
+              nodes={lastSelection?.nodes}
+              onClick={() => {
+                handleGroupNode();
+              }}
+            />
+          </ReactFlow>
+          <div
+            id="shadow-box"
+            style={{
+              position: "absolute",
+              width: `${shadowBoxWidth}px`,
+              height: `${shadowBoxHeight}px`,
+              backgroundColor: `${shadowBoxBackgroundColor}`,
+              opacity: 0.7,
+              pointerEvents: "none",
+            }}
+          ></div>
         </div>
-      </main>
+      ) : (
+        <div className="flex h-full w-full items-center justify-center">
+          <LoadingComponent remSize={30} />
+        </div>
+      )}
     </div>
   );
 }

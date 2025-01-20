@@ -1,9 +1,14 @@
+import { useDarkStore } from "@/stores/darkStore";
 import React, { forwardRef } from "react";
-import { ReactComponent as PineconeSVG } from "./pinecone_logo.svg";
+import SvgPineconeLogo from "./PineconeLogo";
 
 export const PineconeIcon = forwardRef<
   SVGSVGElement,
   React.PropsWithChildren<{}>
 >((props, ref) => {
-  return <PineconeSVG ref={ref} {...props} />;
+  const isDark = useDarkStore((state) => state.dark);
+
+  return (
+    <SvgPineconeLogo ref={ref} {...props} color={isDark ? "#fff" : "#000"} />
+  );
 });

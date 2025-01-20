@@ -1,266 +1,486 @@
-import { Zap } from "lucide-react";
-import { useContext, useEffect, useRef, useState } from "react";
-import { NodeToolbar } from "reactflow";
-import ShadTooltip from "../../components/ShadTooltipComponent";
-import Tooltip from "../../components/TooltipComponent";
-import { useSSE } from "../../contexts/SSEContext";
-import { alertContext } from "../../contexts/alertContext";
-import { PopUpContext } from "../../contexts/popUpContext";
-import { typesContext } from "../../contexts/typesContext";
-import NodeModal from "../../modals/NodeModal";
-import NodeToolbarComponent from "../../pages/FlowPage/components/nodeToolbarComponent";
-import { NodeDataType } from "../../types/flow";
+import ForwardedIconComponent from "@/components/common/genericIconComponent";
+import ShadTooltip from "@/components/common/shadTooltipComponent";
+import { usePostValidateComponentCode } from "@/controllers/API/queries/nodes/use-post-validate-component-code";
+import { useUpdateNodeInternals } from "@xyflow/react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { useHotkeys } from "react-hotkeys-hook";
+import { Button } from "../../components/ui/button";
 import {
-  classNames,
-  nodeColors,
-  nodeIconsLucide,
-  toTitleCase,
-} from "../../utils";
-import ParameterComponent from "./components/parameterComponent";
+  TOOLTIP_HIDDEN_OUTPUTS,
+  TOOLTIP_OPEN_HIDDEN_OUTPUTS,
+} from "../../constants/constants";
+import NodeToolbarComponent from "../../pages/FlowPage/components/nodeToolbarComponent";
+import useAlertStore from "../../stores/alertStore";
+import useFlowStore from "../../stores/flowStore";
+import useFlowsManagerStore from "../../stores/flowsManagerStore";
+import { useShortcutsStore } from "../../stores/shortcuts";
+import { useTypesStore } from "../../stores/typesStore";
+import { VertexBuildTypeAPI } from "../../types/api";
+import { NodeDataType } from "../../types/flow";
+import { checkHasToolMode } from "../../utils/reactflowUtils";
+import { classNames, cn } from "../../utils/utils";
 
-export default function GenericNode({
+import { processNodeAdvancedFields } from "../helpers/process-node-advanced-fields";
+import useCheckCodeValidity from "../hooks/use-check-code-validity";
+import useUpdateNodeCode from "../hooks/use-update-node-code";
+import NodeDescription from "./components/NodeDescription";
+import NodeName from "./components/NodeName";
+import { OutputParameter } from "./components/NodeOutputParameter";
+import NodeStatus from "./components/NodeStatus";
+import RenderInputParameters from "./components/RenderInputParameters";
+import { NodeIcon } from "./components/nodeIcon";
+import { useBuildStatus } from "./hooks/use-get-build-status";
+
+const MemoizedOutputParameter = memo(OutputParameter);
+const MemoizedRenderInputParameters = memo(RenderInputParameters);
+const MemoizedNodeIcon = memo(NodeIcon);
+const MemoizedNodeName = memo(NodeName);
+const MemoizedNodeStatus = memo(NodeStatus);
+const MemoizedNodeDescription = memo(NodeDescription);
+
+const HiddenOutputsButton = memo(
+  ({
+    showHiddenOutputs,
+    onClick,
+  }: {
+    showHiddenOutputs: boolean;
+    onClick: () => void;
+  }) => (
+    <Button
+      unstyled
+      className="group flex h-[1.75rem] w-[1.75rem] items-center justify-center rounded-full border bg-muted hover:text-foreground"
+      onClick={onClick}
+    >
+      <ForwardedIconComponent
+        name={showHiddenOutputs ? "ChevronsDownUp" : "ChevronsUpDown"}
+        strokeWidth={1.5}
+        className="h-4 w-4 text-placeholder-foreground group-hover:text-foreground"
+      />
+    </Button>
+  ),
+);
+
+function GenericNode({
   data,
   selected,
 }: {
   data: NodeDataType;
-  selected: boolean;
-}) {
-  const { setErrorData } = useContext(alertContext);
-  const showError = useRef(true);
-  const { types, deleteNode } = useContext(typesContext);
+  selected?: boolean;
+  xPos?: number;
+  yPos?: number;
+}): JSX.Element {
+  const [isOutdated, setIsOutdated] = useState(false);
+  const [isUserEdited, setIsUserEdited] = useState(false);
+  const [borderColor, setBorderColor] = useState<string>("");
+  const [loadingUpdate, setLoadingUpdate] = useState(false);
+  const [showHiddenOutputs, setShowHiddenOutputs] = useState(false);
+  const [validationStatus, setValidationStatus] =
+    useState<VertexBuildTypeAPI | null>(null);
 
-  const { closePopUp, openPopUp } = useContext(PopUpContext);
-  // any to avoid type conflict
-  const Icon: any =
-    nodeIconsLucide[data.type] || nodeIconsLucide[types[data.type]];
-  const [validationStatus, setValidationStatus] = useState(null);
-  // State for outline color
-  const { sseData, isBuilding } = useSSE();
-  const refHtml = useRef(null);
+  const types = useTypesStore((state) => state.types);
+  const templates = useTypesStore((state) => state.templates);
+  const deleteNode = useFlowStore((state) => state.deleteNode);
+  const setNode = useFlowStore((state) => state.setNode);
+  const updateNodeInternals = useUpdateNodeInternals();
+  const setErrorData = useAlertStore((state) => state.setErrorData);
+  const takeSnapshot = useFlowsManagerStore((state) => state.takeSnapshot);
+  const edges = useFlowStore((state) => state.edges);
+  const shortcuts = useShortcutsStore((state) => state.shortcuts);
+  const buildStatus = useBuildStatus(data, data.id);
 
-  // useEffect(() => {
-  //   if (reactFlowInstance) {
-  //     setParams(Object.values(reactFlowInstance.toObject()));
-  //   }
-  // }, [save]);
+  const showNode = data.showNode ?? true;
 
-  // New useEffect to watch for changes in sseData and update validation status
-  useEffect(() => {
-    const relevantData = sseData[data.id];
-    if (relevantData) {
-      // Extract validation information from relevantData and update the validationStatus state
-      setValidationStatus(relevantData);
-    } else {
-      setValidationStatus(null);
-    }
-  }, [sseData, data.id]);
+  const getValidationStatus = (data) => {
+    setValidationStatus(data);
+    return null;
+  };
 
-  if (!Icon) {
-    if (showError.current) {
-      setErrorData({
-        title: data.type
-          ? `The ${data.type} node could not be rendered, please review your json file`
-          : "There was a node that can't be rendered, please review your json file",
-      });
-      showError.current = false;
-    }
+  const { mutate: validateComponentCode } = usePostValidateComponentCode();
+
+  const updateNodeCode = useUpdateNodeCode(
+    data?.id,
+    data.node!,
+    setNode,
+    setIsOutdated,
+    setIsUserEdited,
+    updateNodeInternals,
+  );
+
+  useCheckCodeValidity(data, templates, setIsOutdated, setIsUserEdited, types);
+
+  if (!data.node!.template) {
+    setErrorData({
+      title: `Error in component ${data.node!.display_name}`,
+      list: [
+        `The component ${data.node!.display_name} has no template.`,
+        `Please contact the developer of the component to fix this issue.`,
+      ],
+    });
+    takeSnapshot();
     deleteNode(data.id);
-    return;
   }
-  useEffect(() => {}, [closePopUp, data.node.template]);
-  return (
-    <>
-      <NodeToolbar>
+
+  const handleUpdateCode = useCallback(() => {
+    setLoadingUpdate(true);
+    takeSnapshot();
+
+    const thisNodeTemplate = templates[data.type]?.template;
+    if (!thisNodeTemplate?.code) return;
+
+    const currentCode = thisNodeTemplate.code.value;
+    if (data.node) {
+      validateComponentCode(
+        { code: currentCode, frontend_node: data.node },
+        {
+          onSuccess: ({ data: resData, type }) => {
+            if (resData && type && updateNodeCode) {
+              const newNode = processNodeAdvancedFields(
+                resData,
+                edges,
+                data.id,
+              );
+              updateNodeCode(newNode, currentCode, "code", type);
+              setLoadingUpdate(false);
+            }
+          },
+          onError: (error) => {
+            setErrorData({
+              title: "Error updating Component code",
+              list: [
+                "There was an error updating the Component.",
+                "If the error persists, please report it on our Discord or GitHub.",
+              ],
+            });
+            console.error(error);
+            setLoadingUpdate(false);
+          },
+        },
+      );
+    }
+  }, [
+    data,
+    templates,
+    edges,
+    updateNodeCode,
+    validateComponentCode,
+    setErrorData,
+    takeSnapshot,
+  ]);
+
+  const handleUpdateCodeWShortcut = useCallback(() => {
+    if (isOutdated && selected) {
+      handleUpdateCode();
+    }
+  }, [isOutdated, selected, handleUpdateCode]);
+
+  const update = useShortcutsStore((state) => state.update);
+  useHotkeys(update, handleUpdateCodeWShortcut, { preventDefault: true });
+
+  // Memoized values
+  const isToolMode = useMemo(
+    () =>
+      data.node?.outputs?.some(
+        (output) => output.name === "component_as_tool",
+      ) ??
+      data.node?.tool_mode ??
+      false,
+    [data.node?.outputs, data.node?.tool_mode],
+  );
+
+  const hasToolMode = useMemo(
+    () => checkHasToolMode(data.node?.template ?? {}),
+    [data.node?.template],
+  );
+
+  const hasOutputs = useMemo(
+    () => data.node?.outputs && data.node.outputs.length > 0,
+    [data.node?.outputs],
+  );
+
+  const renderOutputs = useCallback(
+    (outputs, key?: string) => {
+      return outputs?.map((output, idx) => (
+        <MemoizedOutputParameter
+          key={`${key}-${output.name}-${idx}`}
+          output={output}
+          idx={
+            data.node!.outputs?.findIndex((out) => out.name === output.name) ??
+            idx
+          }
+          lastOutput={idx === outputs.length - 1}
+          data={data}
+          types={types}
+          selected={selected}
+          showNode={showNode}
+          isToolMode={isToolMode}
+        />
+      ));
+    },
+    [data, types, selected, showNode, isToolMode],
+  );
+
+  const { shownOutputs, hiddenOutputs } = useMemo(
+    () => ({
+      shownOutputs:
+        data.node?.outputs?.filter((output) => !output.hidden) ?? [],
+      hiddenOutputs:
+        data.node?.outputs?.filter((output) => output.hidden) ?? [],
+    }),
+    [data.node?.outputs],
+  );
+
+  const memoizedNodeToolbarComponent = useMemo(() => {
+    return selected ? (
+      <div className={cn("absolute -top-12 left-1/2 z-50 -translate-x-1/2")}>
         <NodeToolbarComponent
           data={data}
-          openPopUp={openPopUp}
-          deleteNode={deleteNode}
-        ></NodeToolbarComponent>
-      </NodeToolbar>
+          deleteNode={(id) => {
+            takeSnapshot();
+            deleteNode(id);
+          }}
+          setShowNode={(show) => {
+            setNode(data.id, (old) => ({
+              ...old,
+              data: { ...old.data, showNode: show },
+            }));
+          }}
+          numberOfOutputHandles={shownOutputs.length ?? 0}
+          showNode={showNode}
+          openAdvancedModal={false}
+          onCloseAdvancedModal={() => {}}
+          updateNode={handleUpdateCode}
+          isOutdated={isOutdated && isUserEdited}
+        />
+      </div>
+    ) : (
+      <></>
+    );
+  }, [
+    data,
+    deleteNode,
+    takeSnapshot,
+    setNode,
+    showNode,
+    updateNodeCode,
+    isOutdated,
+    isUserEdited,
+    selected,
+    shortcuts,
+  ]);
 
+  useEffect(() => {
+    if (hiddenOutputs && hiddenOutputs.length === 0) {
+      setShowHiddenOutputs(false);
+    }
+  }, [hiddenOutputs]);
+
+  const renderNodeIcon = useCallback(() => {
+    return (
+      <MemoizedNodeIcon
+        dataType={data.type}
+        showNode={showNode}
+        icon={data.node?.icon}
+        isGroup={!!data.node?.flow}
+        hasToolMode={hasToolMode ?? false}
+      />
+    );
+  }, [data.type, showNode, data.node?.icon, data.node?.flow, hasToolMode]);
+
+  const renderNodeName = useCallback(() => {
+    return (
+      <MemoizedNodeName
+        display_name={data.node?.display_name}
+        nodeId={data.id}
+        selected={selected}
+        showNode={showNode}
+        validationStatus={validationStatus}
+        isOutdated={isOutdated}
+        beta={data.node?.beta || false}
+      />
+    );
+  }, [
+    data.node?.display_name,
+    data.id,
+    selected,
+    showNode,
+    validationStatus,
+    isOutdated,
+    data.node?.beta,
+  ]);
+
+  const renderNodeStatus = useCallback(() => {
+    return (
+      <MemoizedNodeStatus
+        data={data}
+        frozen={data.node?.frozen}
+        showNode={showNode}
+        display_name={data.node?.display_name!}
+        nodeId={data.id}
+        selected={selected}
+        setBorderColor={setBorderColor}
+        buildStatus={buildStatus}
+        isOutdated={isOutdated}
+        isUserEdited={isUserEdited}
+        getValidationStatus={getValidationStatus}
+      />
+    );
+  }, [
+    data,
+    showNode,
+    selected,
+    buildStatus,
+    isOutdated,
+    isUserEdited,
+    getValidationStatus,
+  ]);
+
+  const renderDescription = useCallback(() => {
+    return (
+      <MemoizedNodeDescription
+        description={data.node?.description}
+        mdClassName={"dark:prose-invert"}
+        nodeId={data.id}
+        selected={selected}
+      />
+    );
+  }, [data.node?.description, data.id, selected]);
+
+  const renderInputParameters = useCallback(() => {
+    return (
+      <MemoizedRenderInputParameters
+        data={data}
+        types={types}
+        isToolMode={isToolMode}
+        showNode={showNode}
+        shownOutputs={shownOutputs}
+        showHiddenOutputs={showHiddenOutputs}
+      />
+    );
+  }, [data, types, isToolMode, showNode, shownOutputs, showHiddenOutputs]);
+
+  return (
+    <div className={cn(isOutdated && !isUserEdited ? "relative -mt-10" : "")}>
       <div
-        className={classNames(
-          selected ? "border border-ring" : "border",
-          "generic-node-div"
+        className={cn(
+          borderColor,
+          showNode ? "w-80" : `w-48`,
+          "generic-node-div group/node relative rounded-xl shadow-sm hover:shadow-md",
+          !hasOutputs && "pb-4",
         )}
       >
-        <div className="generic-node-div-title">
-          <div className="generic-node-title-arrangement">
-            <Icon
+        {memoizedNodeToolbarComponent}
+        {isOutdated && !isUserEdited && (
+          <div className="flex h-10 w-full items-center gap-4 rounded-t-[0.69rem] bg-warning p-2 px-4 text-warning-foreground">
+            <ForwardedIconComponent
+              name="AlertTriangle"
               strokeWidth={1.5}
-              className="generic-node-icon"
-              style={{
-                color: nodeColors[types[data.type]] ?? nodeColors.unknown,
-              }}
+              className="h-[18px] w-[18px] shrink-0"
             />
-            <div className="generic-node-tooltip-div">
-              <ShadTooltip content={data.node.display_name}>
-                <div className="generic-node-tooltip-div text-primary">
-                  {data.node.display_name}
-                </div>
-              </ShadTooltip>
-            </div>
-          </div>
-          <div className="round-button-div">
-            <button
-              className="relative"
-              onClick={(event) => {
-                event.preventDefault();
-                openPopUp(<NodeModal data={data} />);
-              }}
-            ></button>
-          </div>
-          <div className="round-button-div">
-            <div>
-              <Tooltip
-                title={
-                  isBuilding ? (
-                    <span>Building...</span>
-                  ) : !validationStatus ? (
-                    <span className="flex">
-                      Build{" "}
-                      <Zap
-                        className="mx-0.5 h-5 fill-build-trigger stroke-build-trigger stroke-1"
-                        strokeWidth={1.5}
-                      />{" "}
-                      flow to validate status.
-                    </span>
-                  ) : (
-                    <div className="max-h-96 overflow-auto">
-                      {validationStatus.params
-                        ? validationStatus.params
-                            .split("\n")
-                            .map((line, index) => <div key={index}>{line}</div>)
-                        : ""}
-                    </div>
-                  )
-                }
-              >
-                <div className="generic-node-status-position">
-                  <div
-                    className={classNames(
-                      validationStatus && validationStatus.valid
-                        ? "green-status"
-                        : "status-build-animation",
-                      "status-div"
-                    )}
-                  ></div>
-                  <div
-                    className={classNames(
-                      validationStatus && !validationStatus.valid
-                        ? "red-status"
-                        : "status-build-animation",
-                      "status-div"
-                    )}
-                  ></div>
-                  <div
-                    className={classNames(
-                      !validationStatus || isBuilding
-                        ? "yellow-status"
-                        : "status-build-animation",
-                      "status-div"
-                    )}
-                  ></div>
-                </div>
-              </Tooltip>
-            </div>
-          </div>
-        </div>
+            <span className="flex-1 truncate text-sm font-medium">
+              {showNode && "Update Ready"}
+            </span>
 
-        <div className="generic-node-desc">
-          <div className="generic-node-desc-text">{data.node.description}</div>
-
-          <>
-            {Object.keys(data.node.template)
-              .filter((t) => t.charAt(0) !== "_")
-              .map((t: string, idx) => (
-                <div key={idx}>
-                  {/* {idx === 0 ? (
-                                <div
-                                    className={classNames(
-                                        "px-5 py-2 mt-2 text-center",
-                                        Object.keys(data.node.template).filter(
-                                            (key) =>
-                                                !key.startsWith("_") &&
-                                                data.node.template[key].show &&
-                                                !data.node.template[key].advanced
-                                        ).length === 0
-                                            ? "hidden"
-                                            : ""
-                                    )}
-                                >
-                                    Inputs
-                                </div>
-                            ) : (
-                                <></>
-                            )} */}
-                  {data.node.template[t].show &&
-                  !data.node.template[t].advanced ? (
-                    <ParameterComponent
-                      data={data}
-                      color={
-                        nodeColors[types[data.node.template[t].type]] ??
-                        nodeColors[data.node.template[t].type] ??
-                        nodeColors.unknown
-                      }
-                      title={
-                        data.node.template[t].display_name
-                          ? data.node.template[t].display_name
-                          : data.node.template[t].name
-                          ? toTitleCase(data.node.template[t].name)
-                          : toTitleCase(t)
-                      }
-                      info={data.node.template[t].info}
-                      name={t}
-                      tooltipTitle={
-                        data.node.template[t].input_types?.join("\n") ??
-                        data.node.template[t].type
-                      }
-                      required={data.node.template[t].required}
-                      id={
-                        (data.node.template[t].input_types?.join(";") ??
-                          data.node.template[t].type) +
-                        "|" +
-                        t +
-                        "|" +
-                        data.id
-                      }
-                      left={true}
-                      type={data.node.template[t].type}
-                      optionalHandle={data.node.template[t].input_types}
-                    />
-                  ) : (
-                    <></>
-                  )}
-                </div>
-              ))}
-            <div
-              className={classNames(
-                Object.keys(data.node.template).length < 1 ? "hidden" : "",
-                "flex-max-width justify-center"
-              )}
+            <Button
+              variant="warning"
+              size="iconMd"
+              className="shrink-0 px-2.5 text-xs"
+              onClick={handleUpdateCode}
+              loading={loadingUpdate}
+              data-testid="update-button"
             >
-              {" "}
+              Update
+            </Button>
+          </div>
+        )}
+        <div
+          data-testid={`${data.id}-main-node`}
+          className={cn(
+            "grid gap-3 truncate text-wrap p-4 leading-5",
+            showNode && "border-b",
+          )}
+        >
+          <div
+            data-testid={"div-generic-node"}
+            className={
+              !showNode
+                ? ""
+                : "generic-node-div-title justify-between rounded-t-lg"
+            }
+          >
+            <div
+              className={"generic-node-title-arrangement"}
+              data-testid="generic-node-title-arrangement"
+            >
+              {renderNodeIcon()}
+              <div className="generic-node-tooltip-div">{renderNodeName()}</div>
             </div>
-            {/* <div className="px-5 py-2 mt-2 text-center">
-                  Output
-              </div> */}
-            <ParameterComponent
-              data={data}
-              color={nodeColors[types[data.type]] ?? nodeColors.unknown}
-              title={
-                data.node.output_types && data.node.output_types.length > 0
-                  ? data.node.output_types.join("|")
-                  : data.type
-              }
-              tooltipTitle={data.node.base_classes.join("\n")}
-              id={[data.type, data.id, ...data.node.base_classes].join("|")}
-              type={data.node.base_classes.join("|")}
-              left={false}
-            />
-          </>
+            <div data-testid={`${showNode ? "show" : "hide"}-node-content`}>
+              {!showNode && (
+                <>
+                  {renderInputParameters()}
+                  {shownOutputs &&
+                    shownOutputs.length > 0 &&
+                    renderOutputs(shownOutputs, "render-outputs")}
+                </>
+              )}
+            </div>
+            {renderNodeStatus()}
+          </div>
+          {showNode && <div>{renderDescription()}</div>}
         </div>
+        {showNode && (
+          <div className="relative">
+            <>
+              {renderInputParameters()}
+              <div
+                className={classNames(
+                  Object.keys(data.node!.template).length < 1 ? "hidden" : "",
+                  "flex-max-width justify-center",
+                )}
+              >
+                {" "}
+              </div>
+              {!showHiddenOutputs &&
+                shownOutputs &&
+                renderOutputs(shownOutputs, "shown")}
+
+              <div
+                className={cn(showHiddenOutputs ? "" : "h-0 overflow-hidden")}
+              >
+                <div className="block">
+                  {renderOutputs(data.node!.outputs, "hidden")}
+                </div>
+              </div>
+              {hiddenOutputs && hiddenOutputs.length > 0 && (
+                <ShadTooltip
+                  content={
+                    showHiddenOutputs
+                      ? `${TOOLTIP_HIDDEN_OUTPUTS} (${hiddenOutputs?.length})`
+                      : `${TOOLTIP_OPEN_HIDDEN_OUTPUTS} (${hiddenOutputs?.length})`
+                  }
+                >
+                  <div
+                    className={cn(
+                      "absolute left-1/2 flex -translate-x-1/2 justify-center",
+                      (shownOutputs && shownOutputs.length > 0) ||
+                        showHiddenOutputs
+                        ? "bottom-[-0.8rem]"
+                        : "bottom-[-0.8rem]",
+                    )}
+                  >
+                    <HiddenOutputsButton
+                      showHiddenOutputs={showHiddenOutputs}
+                      onClick={() => setShowHiddenOutputs(!showHiddenOutputs)}
+                    />
+                  </div>
+                </ShadTooltip>
+              )}
+            </>
+          </div>
+        )}
       </div>
-    </>
+    </div>
   );
 }
+
+export default memo(GenericNode);

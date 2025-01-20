@@ -1,105 +1,113 @@
-import { Download } from "lucide-react";
-import { useContext, useRef, useState } from "react";
-import EditFlowSettings from "../../components/EditFlowSettingsComponent";
-import { Button } from "../../components/ui/button";
+import { track } from "@/customization/utils/analytics";
+import useFlowStore from "@/stores/flowStore";
+import { ReactNode, forwardRef, useEffect, useState } from "react";
+import IconComponent from "../../components/common/genericIconComponent";
+import EditFlowSettings from "../../components/core/editFlowSettingsComponent";
 import { Checkbox } from "../../components/ui/checkbox";
+import { API_WARNING_NOTICE_ALERT } from "../../constants/alerts_constants";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "../../components/ui/dialog";
-import { EXPORT_DIALOG_SUBTITLE } from "../../constants";
-import { alertContext } from "../../contexts/alertContext";
-import { PopUpContext } from "../../contexts/popUpContext";
-import { TabsContext } from "../../contexts/tabsContext";
-import { removeApiKeys } from "../../utils";
+  ALERT_SAVE_WITH_API,
+  EXPORT_DIALOG_SUBTITLE,
+  SAVE_WITH_API_CHECKBOX,
+} from "../../constants/constants";
+import useAlertStore from "../../stores/alertStore";
+import { useDarkStore } from "../../stores/darkStore";
+import { downloadFlow, removeApiKeys } from "../../utils/reactflowUtils";
+import BaseModal from "../baseModal";
 
-export default function ExportModal() {
-  const [open, setOpen] = useState(true);
-  const { closePopUp } = useContext(PopUpContext);
-  const ref = useRef();
-  const { setErrorData } = useContext(alertContext);
-  const { flows, tabId, updateFlow, downloadFlow, saveFlow } =
-    useContext(TabsContext);
-  const [isMaxLength, setIsMaxLength] = useState(false);
-  function setModalOpen(x: boolean) {
-    setOpen(x);
-    if (x === false) {
-      setTimeout(() => {
-        closePopUp();
-      }, 300);
-    }
-  }
-  const [checked, setChecked] = useState(false);
-  const [name, setName] = useState(flows.find((f) => f.id === tabId).name);
-  const [description, setDescription] = useState(
-    flows.find((f) => f.id === tabId).description
-  );
-  return (
-    <Dialog open={true} onOpenChange={setModalOpen}>
-      <DialogTrigger asChild></DialogTrigger>
-      <DialogContent className="h-[420px] lg:max-w-[600px] ">
-        <DialogHeader>
-          <DialogTitle className="flex items-center">
-            <span className="pr-2">Export</span>
-            <Download
-              strokeWidth={1.5}
-              className="h-6 w-6 pl-1 text-foreground"
-              aria-hidden="true"
-            />
-          </DialogTitle>
-          <DialogDescription>{EXPORT_DIALOG_SUBTITLE}</DialogDescription>
-        </DialogHeader>
+const ExportModal = forwardRef(
+  (props: { children: ReactNode }, ref): JSX.Element => {
+    const version = useDarkStore((state) => state.version);
+    const setNoticeData = useAlertStore((state) => state.setNoticeData);
+    const [checked, setChecked] = useState(false);
+    const currentFlow = useFlowStore((state) => state.currentFlow);
+    useEffect(() => {
+      setName(currentFlow?.name ?? "");
+      setDescription(currentFlow?.description ?? "");
+    }, [currentFlow?.name, currentFlow?.description]);
+    const [name, setName] = useState(currentFlow?.name ?? "");
+    const [description, setDescription] = useState(
+      currentFlow?.description ?? "",
+    );
+    const [open, setOpen] = useState(false);
 
-        <EditFlowSettings
-          name={name}
-          description={description}
-          flows={flows}
-          tabId={tabId}
-          setName={setName}
-          setDescription={setDescription}
-          updateFlow={updateFlow}
-        />
-        <div className="flex items-center space-x-2">
-          <Checkbox
-            id="terms"
-            onCheckedChange={(event: boolean) => {
-              setChecked(event);
-            }}
+    return (
+      <BaseModal
+        size="smaller-h-full"
+        open={open}
+        setOpen={setOpen}
+        onSubmit={() => {
+          if (checked) {
+            downloadFlow(
+              {
+                id: currentFlow!.id,
+                data: currentFlow!.data!,
+                description,
+                name,
+                last_tested_version: version,
+                endpoint_name: currentFlow!.endpoint_name,
+                is_component: false,
+              },
+              name!,
+              description,
+            );
+            setNoticeData({
+              title: API_WARNING_NOTICE_ALERT,
+            });
+          } else
+            downloadFlow(
+              removeApiKeys({
+                id: currentFlow!.id,
+                data: currentFlow!.data!,
+                description,
+                name,
+                last_tested_version: version,
+                endpoint_name: currentFlow!.endpoint_name,
+                is_component: false,
+              }),
+              name!,
+              description,
+            );
+          setOpen(false);
+          track("Flow Exported", { flowId: currentFlow!.id });
+        }}
+      >
+        <BaseModal.Trigger asChild>{props.children}</BaseModal.Trigger>
+        <BaseModal.Header description={EXPORT_DIALOG_SUBTITLE}>
+          <span className="pr-2">Export</span>
+          <IconComponent
+            name="Download"
+            className="h-6 w-6 pl-1 text-foreground"
+            aria-hidden="true"
           />
-          <label htmlFor="terms" className="export-modal-save-api text-sm">
-            Save with my API keys
-          </label>
-        </div>
+        </BaseModal.Header>
+        <BaseModal.Content>
+          <EditFlowSettings
+            name={name}
+            description={description}
+            setName={setName}
+            setDescription={setDescription}
+          />
+          <div className="mt-3 flex items-center space-x-2">
+            <Checkbox
+              id="terms"
+              checked={checked}
+              onCheckedChange={(event: boolean) => {
+                setChecked(event);
+              }}
+            />
+            <label htmlFor="terms" className="export-modal-save-api text-sm">
+              {SAVE_WITH_API_CHECKBOX}
+            </label>
+          </div>
+          <span className="mt-1 text-xs text-destructive">
+            {ALERT_SAVE_WITH_API}
+          </span>
+        </BaseModal.Content>
 
-        <DialogFooter>
-          <Button
-            onClick={() => {
-              if (checked)
-                downloadFlow(
-                  flows.find((f) => f.id === tabId),
-                  name,
-                  description
-                );
-              else
-                downloadFlow(
-                  removeApiKeys(flows.find((f) => f.id === tabId)),
-                  name,
-                  description
-                );
-
-              closePopUp();
-            }}
-            type="submit"
-          >
-            Download Flow
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
+        <BaseModal.Footer submit={{ label: "Export" }} />
+      </BaseModal>
+    );
+  },
+);
+export default ExportModal;
