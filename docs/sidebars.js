@@ -11,23 +11,17 @@ module.exports = {
     },
     {
       type: "category",
-      label: "Starter projects",
+      label: "Templates",
       items: [
-        'Starter-Projects/starter-projects-basic-prompting',
-        'Starter-Projects/starter-projects-vector-store-rag',
-        'Starter-Projects/starter-projects-simple-agent',
-      ],
-    },
-    {
-      type: "category",
-      label: "Sample flows",
-      items: [
-        'Sample-Flows/blog-writer',
-        'Sample-Flows/document-qa',
-        'Sample-Flows/memory-chatbot',
-        'Sample-Flows/financial-report-parser',
-        'Sample-Flows/sequential-agent',
-        'Sample-Flows/travel-planning-agent',
+        'Templates/basic-prompting',
+        'Templates/simple-agent',
+        'Templates/blog-writer',
+        'Templates/document-qa',
+        'Templates/memory-chatbot',
+        'Templates/vector-store-rag',
+        'Templates/financial-report-parser',
+        'Templates/sequential-agent',
+        'Templates/travel-planning-agent',
       ],
     },
     {
@@ -41,7 +35,6 @@ module.exports = {
         "Concepts/concepts-objects",
         "Concepts/concepts-publish",
         "Concepts/embedded-chat-widget",
-        "Concepts/mcp-server",
         "Concepts/concepts-file-management",
         "Concepts/concepts-voice-mode",
       ],
@@ -70,8 +63,16 @@ module.exports = {
       type: "category",
       label: "Agents",
       items: [
-        "Agents/agents-overview",
-        "Agents/agent-tool-calling-agent-component",
+        "Agents/agents",
+        "Agents/agents-tools",
+      ],
+    },
+    {
+      type: "category",
+      label: "Model Context Protocol (MCP)",
+      items: [
+        "Concepts/mcp-server",
+        "Components/mcp-client",
       ],
     },
     {
@@ -124,6 +125,17 @@ module.exports = {
           type: "doc",
           id: "Develop/webhook",
           label: "Webhook"
+        },
+        {
+          type: "category",
+          label: "Clients",
+          items: [
+            {
+              type: "doc",
+              id: "Develop/Clients/typescript-client",
+              label: "TypeScript Client"
+            }
+          ]
         },
       ],
     },
@@ -217,14 +229,23 @@ module.exports = {
         },
         {
           type: "doc",
+          id: "Integrations/integrations-assemblyai",
+          label: "AssemblyAI",
+        },
+        {
+          type: "doc",
           id: "Integrations/mcp-component-astra",
           label: "Astra DB MCP server",
         },
-        "Integrations/integrations-assemblyai",
         {
           type: "doc",
           id: "Integrations/Composio/integrations-composio",
           label: "Composio",
+        },
+        {
+          type: "doc",
+          id: "Integrations/Cleanlab/integrations-cleanlab",
+          label: "Cleanlab",
         },
         {
           type: 'category',
@@ -252,9 +273,21 @@ module.exports = {
           type: "category",
           label: "NVIDIA",
           items: [
-            "Integrations/Nvidia/integrations-nvidia-ingest",
-            "Integrations/Nvidia/integrations-nvidia-nim-wsl2",
-            "Integrations/Nvidia/integrations-nvidia-system-assist",
+            {
+              type: "doc",
+              id: "Integrations/Nvidia/integrations-nvidia-ingest",
+              label: "NVIDIA Ingest"
+            },
+            {
+              type: "doc",
+              id: "Integrations/Nvidia/integrations-nvidia-nim-wsl2",
+              label: "NVIDIA NIM on WSL2"
+            },
+            {
+              type: "doc",
+              id: "Integrations/Nvidia/integrations-nvidia-g-assist",
+              label: "NVIDIA G-Assist"
+            },
           ],
         },
       ],
